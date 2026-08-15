@@ -94,6 +94,17 @@
     return out;
   }
 
+  /* Scale a point set about (cx, cy) — the exact inverse of the size
+     normalization scoreFigure() applies, so the reveal can show the truth
+     at the size the score actually compared it against. */
+  function scaledAbout(pts, cx, cy, k) {
+    var f = (isFinite(k) && k > 0) ? k : 1, out = [], i;
+    for (i = 0; i < pts.length; i++) {
+      out.push({ x: cx + (pts[i].x - cx) * f, y: cy + (pts[i].y - cy) * f });
+    }
+    return out;
+  }
+
   /* Even-stride downsample so chamfer cost stays bounded. */
   function decimate(pts, maxN) {
     if (pts.length <= maxN) return pts;
@@ -323,6 +334,9 @@
   var peekUsed = false, peeking = false, peekTimer = null;
   var showStart = 0, ringFrac = 1, rafId = 0;
   var reveal = null, revealTimer = null, revealAt = 0;
+  /* the round's reported result, banked the moment the last figure is
+     scored — finishRound() is presentation only (see finishFigure) */
+  var roundResult = null;
 
   function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
 
@@ -371,12 +385,13 @@
 
   function newRound() {
     stopTimers();
-    /* a round whose last figure is scored but still on its reveal has
-       not reported yet — flush it so a finished round is never lost */
+    /* a round whose last figure is scored but still on its reveal was
+       already banked at that score — close it out on screen before reset */
     if (playing && scores.length === FIGURES_PER_ROUND) finishRound();
     round += 1;
     figIdx = 0;
     scores = [];
+    roundResult = null;
     playing = true;
     hudRound.textContent = String(round);
     hudScore.textContent = '–';
@@ -437,6 +452,15 @@
     var pts = flatten(strokes);
     var res = scoreFigure(strokes, figure.pts, peekUsed ? PEEK_COST : 0, floorPx(), slopPx());
     scores.push(res.score);
+    if (scores.length === FIGURES_PER_ROUND) {
+      /* The round is complete NOW — report before the reveal plays out, so
+         "new round" (or the embed player closing) during that last 2.6s
+         reveal can never swallow three played figures. finishRound() is
+         presentation only; this is the single report site. */
+      roundResult = ArtDaily.report(meanScore(scores));
+      hudScore.textContent = String(roundResult.score);
+      hudBest.textContent = roundResult.best === null ? '–' : String(roundResult.best);
+    }
     var pc = centroid(pts), tc = centroid(figure.pts);
     reveal = {
       score: Math.round(res.score),
@@ -444,6 +468,12 @@
       dy: pc.y - tc.y,
       cx: pc.x,
       cy: pc.y,
+      /* the score judged shape with your size normalized away, so the
+         contour it judged is the truth at YOUR size — drawn at the truth's
+         own size it reads as "your shape was miles out" beside a good
+         number. The faint ghost still shows where and how big it really
+         was, and the sentence below still names the size verdict. */
+      scale: res.sizeRatio,
       shapeOff: Math.round(100 - res.shape),
       sizeRatio: res.sizeRatio
     };
@@ -462,16 +492,21 @@
     finishRound();
   }
 
+  /* Presentation only: finishFigure() already reported the round the
+     instant the third figure was scored, so every completed round reaches
+     ArtDaily.report exactly once — even if this never runs. */
   function finishRound() {
     playing = false;
     phase = 'done'; /* the last reveal stays on the sheet to study */
-    var res = ArtDaily.report(meanScore(scores));
-    hudScore.textContent = String(res.score);
-    hudBest.textContent = res.best === null ? '–' : String(res.best);
+    var res = roundResult;
     hint.textContent = 'round done — press "new round" to go again.';
     syncButtons();
     draw();
-    showToast((res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
+    if (res) {
+      hudScore.textContent = String(res.score);
+      hudBest.textContent = res.best === null ? '–' : String(res.best);
+      showToast((res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
+    }
   }
 
   /* ---- painting (canvas bg stays clear so the CSS dot-grid shows) ---- */
@@ -576,9 +611,11 @@
       drawClosed(figure.pts, c.muted, 2, 0.22);
       /* …their strokes in ink… */
       drawStrokes(c, 1);
-      /* …and the truth re-drawn at THEIR centroid, in accent */
+      /* …and the truth re-drawn at THEIR centroid and THEIR size, in
+         accent: that is the shape the score compared, laid over the ink */
       if (reveal) {
-        drawClosed(translated(figure.pts, reveal.dx, reveal.dy), c.accent, 2.5, 0.95);
+        drawClosed(scaledAbout(translated(figure.pts, reveal.dx, reveal.dy), reveal.cx, reveal.cy, reveal.scale),
+          c.accent, 2.5, 0.95);
         drawSticker(c, String(reveal.score), reveal.cx, reveal.cy);
       }
       return;
