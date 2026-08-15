@@ -166,14 +166,75 @@
      while honest traces, whose errors are symmetric, score the
      same. Nearest is measured point→opposite *path* (segments, not
      samples) so a perfect trace really scores a perfect 0 at any
-     sampling density. */
-  function chamferStrokes(strokes, truePts) {
+     sampling density.
+
+     The per-sample truth→ink distances are kept as well as the mean:
+     they are what lets the reveal point AT the part of the outline the
+     memory dropped, instead of only pricing it. */
+  function chamferParts(strokes, truePts) {
     var pPts = decimate(flatten(strokes), MAX_SCORE_PTS);
-    if (!pPts.length || truePts.length < 2) return Infinity;
-    var sumA = 0, sumB = 0, i;
+    if (!pPts.length || truePts.length < 2) return { worst: Infinity, perTruth: [] };
+    var sumA = 0, sumB = 0, i, d, per = [];
     for (i = 0; i < pPts.length; i++) sumA += distToClosedPath(pPts[i], truePts);
-    for (i = 0; i < truePts.length; i++) sumB += distToStrokes(truePts[i], strokes);
-    return Math.max(sumA / pPts.length, sumB / truePts.length);
+    for (i = 0; i < truePts.length; i++) {
+      d = distToStrokes(truePts[i], strokes);
+      per.push(d);
+      sumB += d;
+    }
+    return { worst: Math.max(sumA / pPts.length, sumB / truePts.length), perTruth: per };
+  }
+
+  function chamferStrokes(strokes, truePts) {
+    return chamferParts(strokes, truePts).worst;
+  }
+
+  /* Which quarter of the outline drifted furthest, named the way a
+     person looks at a drawing rather than in radians. Angles are taken
+     about the figure's own centre in screen space (y grows down), so
+     −90° is the top. */
+  var SIDE_NAMES = ['the right side', 'the bottom', 'the left side', 'the top'];
+
+  function worstSide(truePts, perTruth) {
+    var n = Math.min(truePts ? truePts.length : 0, perTruth ? perTruth.length : 0);
+    if (!n) return null;
+    var c = centroid(truePts), sum = [0, 0, 0, 0], cnt = [0, 0, 0, 0], i, a, q, m, best = -1, bi = 0;
+    for (i = 0; i < n; i++) {
+      if (!isFinite(perTruth[i])) continue;
+      a = Math.atan2(truePts[i].y - c.y, truePts[i].x - c.x);
+      q = Math.floor((((a + Math.PI / 4) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI)) / (Math.PI / 2)) % 4;
+      sum[q] += perTruth[i];
+      cnt[q] += 1;
+    }
+    for (i = 0; i < 4; i++) {
+      m = cnt[i] ? sum[i] / cnt[i] : 0;
+      if (m > best) { best = m; bi = i; }
+    }
+    return { side: SIDE_NAMES[bi], mean: best >= 0 ? best : 0 };
+  }
+
+  /* Contiguous index runs of the CLOSED outline that ended up further
+     from the player's ink than the whole scoring window — the stretches
+     memory genuinely lost. A run crossing the seam is joined up rather
+     than reported twice; runs under 3 samples are noise. */
+  function missRuns(perTruth, zeroPx) {
+    var n = perTruth ? perTruth.length : 0, runs = [], i, start = -1;
+    if (!n || !(zeroPx > 0)) return runs;
+    for (i = 0; i < n; i++) {
+      if (perTruth[i] > zeroPx) {
+        if (start < 0) start = i;
+      } else if (start >= 0) {
+        runs.push([start, i - 1]);
+        start = -1;
+      }
+    }
+    if (start >= 0) runs.push([start, n - 1]);
+    if (runs.length > 1 && runs[0][0] === 0 && runs[runs.length - 1][1] === n - 1) {
+      runs[0][0] = runs[runs.length - 1][0] - n;
+      runs.pop();
+    }
+    var out = [];
+    for (i = 0; i < runs.length; i++) if (runs[i][1] - runs[i][0] >= 2) out.push(runs[i]);
+    return out;
   }
 
   /* The chamfer (in px, measured in the truth's own frame) at which the
@@ -193,7 +254,12 @@
   /* Size errors within ±~20% are free, then up to −10: drawing it
      half-size is a memory failure too, but a gentle one. */
   function sizePenalty(sizeRatio) {
-    if (sizeRatio <= 0) return 10;
+    /* NaN fails every comparison below and would sail straight through
+       clamp01 as NaN, poisoning the whole figure score. Today nothing
+       reaches here with NaN only because boundingDiag happens to skip
+       non-finite points — that is an accident of another function, not
+       a guarantee this one may lean on. */
+    if (!isFinite(sizeRatio) || sizeRatio <= 0) return 10;
     return 10 * clamp01((Math.abs(Math.log(sizeRatio)) - 0.18) / 0.5);
   }
 
@@ -204,9 +270,9 @@
      then shape − size − peek, clamped to 0–100. */
   function scoreFigure(strokes, truePts, peekCost, floorPx, slopPx) {
     var pts = flatten(strokes);
-    if (!pts.length || truePts.length < 2) return { score: 0, shape: 0, sizeRatio: 0 };
+    if (!pts.length || truePts.length < 2) return { score: 0, shape: 0, sizeRatio: 0, side: null, missRuns: [] };
     var trueDiag = boundingDiag(truePts);
-    if (!isFinite(trueDiag) || trueDiag === 0) return { score: 0, shape: 0, sizeRatio: 0 };
+    if (!isFinite(trueDiag) || trueDiag === 0) return { score: 0, shape: 0, sizeRatio: 0, side: null, missRuns: [] };
     var playerDiag = boundingDiag(pts);
     var ratio = playerDiag / trueDiag;
     var tc = centroid(truePts), pc = centroid(pts);
@@ -220,9 +286,19 @@
       }
       norm.push(ns);
     }
-    var shape = shapeScore(chamferStrokes(norm, truePts), shapeZeroPx(trueDiag, floorPx, slopPx));
+    var zero = shapeZeroPx(trueDiag, floorPx, slopPx);
+    var parts = chamferParts(norm, truePts);
+    var shape = shapeScore(parts.worst, zero);
     var score = Math.max(0, Math.min(100, shape - sizePenalty(ratio) - peekCost));
-    return { score: score, shape: shape, sizeRatio: ratio };
+    /* perTruth is measured in the TRUTH's frame (the player's drawing
+       normalized onto it), which is the frame the score was computed in
+       — and it is indexed by truePts, so the reveal can use the same
+       indices against the contour it draws in the player's own frame. */
+    return {
+      score: score, shape: shape, sizeRatio: ratio,
+      side: worstSide(truePts, parts.perTruth),
+      missRuns: missRuns(parts.perTruth, zero)
+    };
   }
 
   function meanScore(list) {
@@ -431,6 +507,15 @@
     rafId = requestAnimationFrame(tickShow);
   }
 
+  /* "shape 23% off" priced the miss without ever placing it. Name the
+     quarter of the outline that drifted furthest, but only when the
+     shape was actually off — telling someone who scored 96 that their
+     left side was marginally the worst is noise, not coaching. */
+  function placeWords(res) {
+    if (!res || !res.side || res.shape >= 88) return '';
+    return ' (worst on ' + res.side.side + ')';
+  }
+
   /* "size ratio 0.71x" told a beginner nothing — say it in words. */
   function sizeWords(ratio) {
     if (!isFinite(ratio) || ratio <= 0) return 'size unclear';
@@ -475,10 +560,11 @@
          was, and the sentence below still names the size verdict. */
       scale: res.sizeRatio,
       shapeOff: Math.round(100 - res.shape),
-      sizeRatio: res.sizeRatio
+      sizeRatio: res.sizeRatio,
+      missRuns: res.missRuns || []
     };
-    hint.textContent = figLabel() + ' — shape ' + reveal.shapeOff + '% off, ' + sizeWords(reveal.sizeRatio) +
-      (peekUsed ? ', peek −' + PEEK_COST : '') + '. tap to continue.';
+    hint.textContent = figLabel() + ' — shape ' + reveal.shapeOff + '% off' + placeWords(res) + ', ' +
+      sizeWords(reveal.sizeRatio) + (peekUsed ? ', peek −' + PEEK_COST : '') + '. tap to continue.';
     syncButtons();
     draw();
     revealTimer = setTimeout(nextFigure, REVEAL_MS);
@@ -557,6 +643,29 @@
     ctx.restore();
   }
 
+  /* Fat overlay on the missed stretches of the revealed contour. A run
+     may start at a negative index because the outline is a closed loop
+     and a miss can straddle the seam — walk it modulo the sample count,
+     or that miss would be drawn as a chord straight across the figure. */
+  function drawMissRuns(c, pts, runs) {
+    var n = pts.length, r, i, k, p;
+    if (!n) return;
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 6;
+    for (r = 0; r < runs.length; r++) {
+      ctx.beginPath();
+      for (i = runs[r][0]; i <= runs[r][1]; i++) {
+        k = ((i % n) + n) % n;
+        p = pts[k];
+        if (i === runs[r][0]) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   /* Ink text on an accent-tinted chip — AA in both themes (raw
      sunny text on the light card is ~2:1). */
   function drawSticker(c, label, x, y) {
@@ -614,8 +723,12 @@
       /* …and the truth re-drawn at THEIR centroid and THEIR size, in
          accent: that is the shape the score compared, laid over the ink */
       if (reveal) {
-        drawClosed(scaledAbout(translated(figure.pts, reveal.dx, reveal.dy), reveal.cx, reveal.cy, reveal.scale),
-          c.accent, 2.5, 0.95);
+        var shown = scaledAbout(translated(figure.pts, reveal.dx, reveal.dy), reveal.cx, reveal.cy, reveal.scale);
+        drawClosed(shown, c.accent, 2.5, 0.95);
+        /* the stretches your ink never came near, drawn fat on the very
+           contour the score compared: thin = you remembered it, thick =
+           you did not. The hint names the quarter it happened in. */
+        if (reveal.missRuns && reveal.missRuns.length) drawMissRuns(c, shown, reveal.missRuns);
         drawSticker(c, String(reveal.score), reveal.cx, reveal.cy);
       }
       return;
