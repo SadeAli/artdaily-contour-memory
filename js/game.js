@@ -709,6 +709,12 @@
   /* interrupted stroke (system gesture etc.) — keep the ink, no penalty */
   canvas.addEventListener('pointercancel', endStroke);
   window.addEventListener('pointercancel', endStroke);
+  /* iOS can drop the capture with NO pointerup and NO pointercancel. Without
+     this the stroke never ends: activePointer stays set, every later press is
+     refused by the pen-takeover guard, and the redraw cannot be finished at
+     all. lostpointercapture always fires on the capturing element, and after a
+     normal pointerup it is a no-op (activePointer is already null). */
+  canvas.addEventListener('lostpointercapture', endStroke);
 
   /* ---- stage controls ---- */
   btnDone.addEventListener('click', function () {
