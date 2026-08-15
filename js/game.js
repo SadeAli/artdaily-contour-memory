@@ -289,7 +289,14 @@
     var zero = shapeZeroPx(trueDiag, floorPx, slopPx);
     var parts = chamferParts(norm, truePts);
     var shape = shapeScore(parts.worst, zero);
-    var score = Math.max(0, Math.min(100, shape - sizePenalty(ratio) - peekCost));
+    /* Clamped AND checked. shapeScore and sizePenalty each guarantee a
+       finite number on their own, but peekCost arrives from the caller and
+       Math.min/Math.max propagate NaN silently — an unguarded NaN here is
+       the worst possible failure, because report() files it as a 0 with
+       nothing on the sheet saying the drill broke. Every sibling drill
+       ends its scorer this way; this one did not. */
+    var score = Math.max(0, Math.min(100, shape - sizePenalty(ratio) - (isFinite(peekCost) ? peekCost : 0)));
+    if (!isFinite(score)) score = 0;
     /* perTruth is measured in the TRUTH's frame (the player's drawing
        normalized onto it), which is the frame the score was computed in
        — and it is indexed by truePts, so the reveal can use the same
