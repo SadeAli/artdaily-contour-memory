@@ -43,6 +43,7 @@
           <div class="hud-stat"><dt>round</dt><dd id="hudRound">–</dd></div>
           <div class="hud-stat"><dt>score</dt><dd id="hudScore">–</dd></div>
           <div class="hud-stat"><dt>best</dt><dd id="hudBest">–</dd></div>
+                <div class="hud-stat hud-input"><dd id="inputMode" hidden></dd></div>
         </dl>
       </div>
 
@@ -53,8 +54,9 @@
         <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
         <div class="stage-controls">
           <button class="btn btn-primary" id="btnDone" disabled>done ✓</button>
+          <button class="btn" id="btnUndo" disabled>undo <span aria-hidden="true">↶</span></button>
           <button class="btn" id="btnClear" disabled>clear</button>
-          <button class="btn" id="btnPeek" disabled>peek −15</button>
+          <button class="btn" id="btnPeek" disabled>peek −8</button>
         </div>
       </div>
 
@@ -64,9 +66,10 @@
       </div>
       <div class="howto" id="howTo" hidden>
         <p class="howto-cmd" aria-hidden="true"><span class="prompt">$</span> man contour-memory</p>
-        <p>A blob flashes, then hides. Redraw its contour from memory — any strokes, anywhere — then press “done ✓”. Three figures per round, each shown shorter and shaped trickier.</p>
-        <p>Scoring compares your shape to the real one, wherever you drew it; drawing it far too small or big costs a little, and “peek −15” reshows the figure once at exactly that price.</p>
-        <p>Studio tip: don’t memorize the outline — pick 3 landmarks and hold the big gesture between them.</p>
+        <p>A blob flashes, then hides. Redraw its outline (its contour) from memory — any number of strokes, anywhere, lifting as often as you like — then press “done ✓”. “undo” drops the last stroke; “clear” wipes them all. Three figures per round, each shown shorter and shaped trickier.</p>
+        <p>Scoring compares your shape to the real one, wherever you drew it; drawing it far too small or big costs a little, and “peek −8” reshows the figure once at exactly that price.</p>
+        <p>The drill also eases its tolerance for what you are drawing with — pen, mouse or finger — and the HUD says which. Your score is only ever compared with your own.</p>
+        <p>Studio tip: don’t try to memorize every wiggle. Pick 3 landmarks — the widest bump, the deepest dent, the sharpest corner — and keep the shape between them true.</p>
       </div>
 
       <noscript><p class="hint">This drill needs JavaScript — nothing else, no trackers, no accounts.</p></noscript>

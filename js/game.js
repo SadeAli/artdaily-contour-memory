@@ -7,27 +7,49 @@
    geometry: centroid- and scale-aligned symmetric chamfer keeps
    shape and size separate, size costing only a gentle explicit
    penalty — the pure functions sit at the top
-   so they are unit-testable without a canvas. One honest "peek
-   −15" per figure reshows the shape for 400ms.
+   so they are unit-testable without a canvas. The chamfer that
+   scores zero has a pixel floor and a per-mode hand allowance
+   (ArtDaily.ease), so a phone sheet is not a stricter drill than a
+   desktop one. One honest "peek −8" per figure reshows the shape
+   for 0.6s (0.9s behind a fingertip); "undo" drops a stray stroke
+   without wiping the attempt.
    ============================================================ */
 (function () {
   'use strict';
 
   var SLUG = 'contour-memory';
   var FIGURES_PER_ROUND = 3;
-  var MIN_POINTS = 20;      /* "done ✓" unlocks at this many samples */
-  var PEEK_MS = 400;
-  var PEEK_COST = 15;
+  /* "done ✓" unlocks on drawn INK, never on a sample count: a fast
+     confident sweep from a pen tablet can finish a whole contour in
+     eight pointermove events, and counting samples left that player
+     staring at a greyed button under a finished drawing. */
+  var MIN_INK_PX = 40;
+  var MIN_STROKE_PX = 5;    /* shorter than this = an accidental tap */
+  var PEEK_COST = 8;
   var REVEAL_MS = 2600;
   var SAMPLES_PER_SEG = 18; /* spline density (also the ground truth) */
   var MAX_SCORE_PTS = 400;  /* player samples are decimated to this */
 
+  /* Tolerance, in three honest parts (see shapeZeroPx):
+       relative — 11% of the figure's own diagonal, the memory standard;
+       floor    — but never a tighter window than this many px, so a
+                  330px phone sheet is not a stricter drill than a 690px
+                  desktop one for exactly the same blob;
+       slop     — plus the wobble the hardware contributes and the drill
+                  is not trying to measure. Both px terms go through
+                  ArtDaily.ease, so a mouse or a fingertip gets the room
+                  a nib does not need. */
+  var SHAPE_FALLOFF = 0.11;
+  var SHAPE_FLOOR_PX = 16;
+  var HAND_SLOP_PX = 6;
+
   /* Difficulty ramps within the round: more control points, deeper
-     concavities, shorter exposure. */
+     concavities, shorter exposure. Figure 1 is deliberately easy — a
+     first-timer's first result has to read as a result. */
   var FIGURE_SPECS = [
-    { points: 6,  rLo: 0.78, rHi: 1.00, exposure: 2000 },
-    { points: 8,  rLo: 0.62, rHi: 1.00, exposure: 1200 },
-    { points: 10, rLo: 0.42, rHi: 1.00, exposure: 700 }
+    { points: 6,  rLo: 0.78, rHi: 1.00, exposure: 2800 },
+    { points: 8,  rLo: 0.62, rHi: 1.00, exposure: 1800 },
+    { points: 10, rLo: 0.55, rHi: 1.00, exposure: 1100 }
   ];
 
   /* ============================================================
@@ -51,6 +73,19 @@
       if (pts[i].y > maxY) maxY = pts[i].y;
     }
     return Math.hypot(maxX - minX, maxY - minY);
+  }
+
+  function polyLength(pts) {
+    var L = 0, i;
+    for (i = 1; i < pts.length; i++) L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    return L;
+  }
+
+  function inkLength(strokes, extra) {
+    var L = 0, i;
+    for (i = 0; i < strokes.length; i++) L += polyLength(strokes[i]);
+    if (extra) L += polyLength(extra);
+    return L;
   }
 
   function translated(pts, dx, dy) {
@@ -130,8 +165,19 @@
     return Math.max(sumA / pPts.length, sumB / truePts.length);
   }
 
-  /* Chamfer of 11% of the figure's bounding diagonal scores zero. */
-  function shapeScore(dNorm) { return 100 * clamp01(1 - dNorm / 0.11); }
+  /* The chamfer (in px, measured in the truth's own frame) at which the
+     shape score reaches zero. floorPx and slopPx arrive already eased
+     for the player's hardware. */
+  function shapeZeroPx(trueDiag, floorPx, slopPx) {
+    var f = typeof floorPx === 'number' && isFinite(floorPx) ? floorPx : 0;
+    var s = typeof slopPx === 'number' && isFinite(slopPx) ? slopPx : 0;
+    return Math.max(SHAPE_FALLOFF * trueDiag, f) + s;
+  }
+
+  function shapeScore(chamferPx, zeroPx) {
+    if (!(zeroPx > 0) || !isFinite(chamferPx)) return 0;
+    return 100 * clamp01(1 - chamferPx / zeroPx);
+  }
 
   /* Size errors within ±~20% are free, then up to −10: drawing it
      half-size is a memory failure too, but a gentle one. */
@@ -143,13 +189,13 @@
   /* Full per-figure pipeline: align the player's centroid onto the
      true contour's and scale their drawing to the true bounding
      diagonal (shape is judged as shape — size is judged separately,
-     and gently, by sizePenalty), chamfer normalized by the true
-     diagonal, then shape − size − peek, clamped to 0–100. */
-  function scoreFigure(strokes, truePts, peekCost) {
+     and gently, by sizePenalty), chamfer measured against shapeZeroPx,
+     then shape − size − peek, clamped to 0–100. */
+  function scoreFigure(strokes, truePts, peekCost, floorPx, slopPx) {
     var pts = flatten(strokes);
     if (!pts.length || truePts.length < 2) return { score: 0, shape: 0, sizeRatio: 0 };
     var trueDiag = boundingDiag(truePts);
-    if (trueDiag === 0) return { score: 0, shape: 0, sizeRatio: 0 };
+    if (!isFinite(trueDiag) || trueDiag === 0) return { score: 0, shape: 0, sizeRatio: 0 };
     var playerDiag = boundingDiag(pts);
     var ratio = playerDiag / trueDiag;
     var tc = centroid(truePts), pc = centroid(pts);
@@ -163,8 +209,7 @@
       }
       norm.push(ns);
     }
-    var dNorm = chamferStrokes(norm, truePts) / trueDiag;
-    var shape = shapeScore(dNorm);
+    var shape = shapeScore(chamferStrokes(norm, truePts), shapeZeroPx(trueDiag, floorPx, slopPx));
     var score = Math.max(0, Math.min(100, shape - sizePenalty(ratio) - peekCost));
     return { score: score, shape: shape, sizeRatio: ratio };
   }
@@ -207,10 +252,20 @@
   var hudScore = document.getElementById('hudScore');
   var hudBest = document.getElementById('hudBest');
   var btnDone = document.getElementById('btnDone');
+  var btnUndo = document.getElementById('btnUndo');
   var btnClear = document.getElementById('btnClear');
   var btnPeek = document.getElementById('btnPeek');
 
   ArtDaily.init({ slug: SLUG });
+
+  /* ---- per-hardware tolerance (the drill says which mode it eased
+          for in the HUD, so the record stays honest) ---- */
+  function floorPx() { return ArtDaily.ease(SHAPE_FLOOR_PX); }
+  function slopPx() { return ArtDaily.ease(HAND_SLOP_PX); }
+
+  /* A peek behind your own fingertip needs longer than a peek behind a
+     mouse cursor — same price either way. */
+  function peekMs() { return ArtDaily.inputMode() === 'mouse' ? 600 : 900; }
 
   /* ---- theme-aware inks (re-read on every repaint) ---- */
   function hexToRgb(h) {
@@ -264,7 +319,7 @@
   /* ---- round state ---- */
   var round = 0, figIdx = 0, figure = null, scores = [], playing = false;
   var phase = 'idle'; /* idle | show | draw | reveal | done */
-  var strokes = [], curStroke = null, activePointer = null;
+  var strokes = [], curStroke = null, activePointer = null, activeType = '';
   var peekUsed = false, peeking = false, peekTimer = null;
   var showStart = 0, ringFrac = 1, rafId = 0;
   var reveal = null, revealTimer = null, revealAt = 0;
@@ -273,11 +328,7 @@
 
   function figLabel() { return 'figure ' + (figIdx + 1) + ' of ' + FIGURES_PER_ROUND; }
 
-  function pointCount() {
-    var n = curStroke ? curStroke.length : 0, i;
-    for (i = 0; i < strokes.length; i++) n += strokes[i].length;
-    return n;
-  }
+  function inkPx() { return inkLength(strokes, curStroke); }
 
   /* Radial control points around the canvas centre → smooth blob
      spanning ~45% of the sheet. */
@@ -297,13 +348,16 @@
       pts: catmullRomClosed(ctrl, SAMPLES_PER_SEG),
       center: { x: cx, y: cy },
       ringR: R + 24,
-      exposure: spec.exposure
+      /* a 92px blob on a phone is not the same memory task as a 190px
+         one on a desktop — small sheets get a longer look */
+      exposure: Math.round(spec.exposure * Math.max(1, Math.min(1.6, 690 / Math.max(1, W))))
     };
   }
 
   function syncButtons() {
     var drawPhase = playing && phase === 'draw';
-    btnDone.disabled = !drawPhase || pointCount() < MIN_POINTS;
+    btnDone.disabled = !drawPhase || inkPx() < MIN_INK_PX;
+    btnUndo.disabled = !drawPhase || strokes.length === 0;
     btnClear.disabled = !drawPhase || (strokes.length === 0 && !curStroke);
     btnPeek.disabled = !drawPhase || peekUsed || peeking;
   }
@@ -333,6 +387,7 @@
     strokes = [];
     curStroke = null;
     activePointer = null;
+    activeType = '';
     peekUsed = false;
     peeking = false;
     reveal = null;
@@ -351,7 +406,7 @@
     var elapsed = now - showStart;
     if (elapsed >= figure.exposure) {
       phase = 'draw';
-      hint.textContent = figLabel() + ' — gone! redraw its contour from memory, anywhere.';
+      hint.textContent = figLabel() + ' — gone! redraw its outline from memory: any number of strokes, anywhere on the sheet.';
       syncButtons();
       draw();
       return;
@@ -361,17 +416,26 @@
     rafId = requestAnimationFrame(tickShow);
   }
 
+  /* "size ratio 0.71x" told a beginner nothing — say it in words. */
+  function sizeWords(ratio) {
+    if (!isFinite(ratio) || ratio <= 0) return 'size unclear';
+    if (ratio < 0.8) return 'you drew it smaller than it was';
+    if (ratio > 1.25) return 'you drew it bigger than it was';
+    return 'size about right';
+  }
+
   function finishFigure() {
     clearTimeout(peekTimer);
     peeking = false;
     /* commit any stroke still in progress (e.g. keyboard "done ✓") */
     activePointer = null;
-    if (curStroke && curStroke.length >= 3) strokes.push(curStroke);
+    activeType = '';
+    if (curStroke && polyLength(curStroke) >= MIN_STROKE_PX) strokes.push(curStroke);
     curStroke = null;
     phase = 'reveal';
     revealAt = performance.now();
     var pts = flatten(strokes);
-    var res = scoreFigure(strokes, figure.pts, peekUsed ? PEEK_COST : 0);
+    var res = scoreFigure(strokes, figure.pts, peekUsed ? PEEK_COST : 0, floorPx(), slopPx());
     scores.push(res.score);
     var pc = centroid(pts), tc = centroid(figure.pts);
     reveal = {
@@ -383,8 +447,8 @@
       shapeOff: Math.round(100 - res.shape),
       sizeRatio: res.sizeRatio
     };
-    hint.textContent = figLabel() + ' — shape ' + reveal.shapeOff + '% off, size ratio ' +
-      reveal.sizeRatio.toFixed(2) + 'x' + (peekUsed ? ', peek −' + PEEK_COST : '') + '. tap to continue.';
+    hint.textContent = figLabel() + ' — shape ' + reveal.shapeOff + '% off, ' + sizeWords(reveal.sizeRatio) +
+      (peekUsed ? ', peek −' + PEEK_COST : '') + '. tap to continue.';
     syncButtons();
     draw();
     revealTimer = setTimeout(nextFigure, REVEAL_MS);
@@ -530,6 +594,30 @@
     return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
   }
 
+  /* A 120Hz nib emits far more motion than the page is told about;
+     coalesced samples keep a fast sweep's real shape instead of the
+     browser's dispatch rate. */
+  function pushSamples(ev, arr) {
+    var list = null;
+    try { list = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null; } catch (e) { list = null; }
+    if (list && list.length) {
+      for (var i = 0; i < list.length; i++) arr.push(pointerPos(list[i]));
+      return;
+    }
+    arr.push(pointerPos(ev));
+  }
+
+  /* Palm rejection. pointerId guarding only ever rejected the SECOND
+     contact — on a tablet the palm lands first, so the nib was the one
+     being ignored. A pen now takes the stroke off a touch that already
+     started, and touches are ignored for a beat after any pen. */
+  var penAt = -Infinity, PEN_GUARD_MS = 900;
+  function claimAllowed(ev) {
+    if (ev.pointerType === 'pen') { penAt = performance.now(); return true; }
+    if (ev.pointerType === 'touch' && performance.now() - penAt < PEN_GUARD_MS) return false;
+    return true;
+  }
+
   canvas.addEventListener('pointerdown', function (ev) {
     ev.preventDefault();
     if (phase === 'idle') { newRound(); return; } /* first screen: tap to start */
@@ -539,8 +627,15 @@
       if (performance.now() - revealAt > 350) nextFigure();
       return;
     }
-    if (phase !== 'draw' || peeking || activePointer !== null) return;
+    if (phase !== 'draw' || peeking) return;
+    if (!claimAllowed(ev)) return;
+    if (activePointer !== null) {
+      /* only a pen may take over, and it throws the palm's drift away */
+      if (ev.pointerType !== 'pen' || activeType === 'pen') return;
+      curStroke = null;
+    }
     activePointer = ev.pointerId;
+    activeType = ev.pointerType || '';
     curStroke = [pointerPos(ev)];
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     draw();
@@ -549,20 +644,23 @@
   canvas.addEventListener('pointermove', function (ev) {
     if (activePointer === null || ev.pointerId !== activePointer || !curStroke) return;
     ev.preventDefault();
-    curStroke.push(pointerPos(ev));
+    pushSamples(ev, curStroke);
     draw();
   });
 
   function endStroke(ev) {
     if (activePointer === null || ev.pointerId !== activePointer) return;
     activePointer = null;
-    /* strokes under 3 samples are accidental taps — dropped, no penalty */
-    if (curStroke && curStroke.length >= 3) strokes.push(curStroke);
+    activeType = '';
+    /* a dab shorter than MIN_STROKE_PX is an accidental tap — dropped,
+       no penalty. Length, not sample count: a fast pen dab can be two
+       samples and still be a real mark. */
+    if (curStroke && polyLength(curStroke) >= MIN_STROKE_PX) strokes.push(curStroke);
     curStroke = null;
     if (phase === 'draw') {
-      hint.textContent = figLabel() + (pointCount() >= MIN_POINTS ?
-        ' — press "done ✓" when it looks right, or keep refining.' :
-        ' — keep going: a full contour, not a tap.');
+      hint.textContent = figLabel() + (inkPx() >= MIN_INK_PX ?
+        ' — press "done ✓" when it looks right, or keep refining. lifting is free.' :
+        ' — keep going: a whole outline, not a tap. lift as often as you like.');
     }
     syncButtons();
     draw();
@@ -571,15 +669,25 @@
   /* fallback if pointer capture failed and the release lands off-canvas */
   window.addEventListener('pointerup', endStroke);
 
-  canvas.addEventListener('pointercancel', function (ev) {
-    /* interrupted stroke (system gesture etc.) — keep the ink, no penalty */
-    endStroke(ev);
-  });
+  /* interrupted stroke (system gesture etc.) — keep the ink, no penalty */
+  canvas.addEventListener('pointercancel', endStroke);
+  window.addEventListener('pointercancel', endStroke);
 
   /* ---- stage controls ---- */
   btnDone.addEventListener('click', function () {
-    if (phase !== 'draw' || pointCount() < MIN_POINTS) return;
+    if (phase !== 'draw' || inkPx() < MIN_INK_PX) return;
     finishFigure();
+  });
+
+  /* One stray mark used to poison the score three ways at once (it grows
+     the bounding diagonal, shrinks the scale normalization and moves the
+     size ratio) and the only escape was wiping the whole attempt. */
+  btnUndo.addEventListener('click', function () {
+    if (phase !== 'draw' || !strokes.length) return;
+    strokes.pop();
+    hint.textContent = figLabel() + ' — last stroke removed.';
+    syncButtons();
+    draw();
   });
 
   btnClear.addEventListener('click', function () {
@@ -587,6 +695,7 @@
     strokes = [];
     curStroke = null;
     activePointer = null;
+    activeType = '';
     hint.textContent = figLabel() + ' — cleared. redraw from memory (the figure stays hidden).';
     syncButtons();
     draw();
@@ -597,7 +706,8 @@
     /* commit any in-progress stroke: no drawing while the truth shows */
     if (activePointer !== null) {
       activePointer = null;
-      if (curStroke && curStroke.length >= 3) strokes.push(curStroke);
+      activeType = '';
+      if (curStroke && polyLength(curStroke) >= MIN_STROKE_PX) strokes.push(curStroke);
       curStroke = null;
     }
     peekUsed = true;
@@ -610,7 +720,7 @@
       if (phase === 'draw') hint.textContent = figLabel() + ' — back to memory. finish your redraw.';
       syncButtons();
       draw();
-    }, PEEK_MS);
+    }, peekMs());
   });
 
   /* ---- chrome wiring ---- */
@@ -624,6 +734,11 @@
   });
 
   ArtDaily.onTheme(draw);
+
+  /* Hardware swapped mid-session (a laptop player plugs in a tablet, an
+     iPad player picks up the pencil): the SDK repaints its own HUD chip,
+     we just re-read the eased tolerance on the next score. */
+  ArtDaily.onInput(function () { syncButtons(); draw(); });
 
   /* On resize everything scales uniformly (height tracks width), so
      the memorized figure and the ink stay fair — never regenerated. */
@@ -670,7 +785,7 @@
   var best = ArtDaily.best();
   hudBest.textContent = best === null ? '–' : String(best);
   figure = makeFigure(0); /* dashed sample blob for the start screen */
-  hint.textContent = 'a blob flashes, then hides — you redraw its contour from memory, any strokes, anywhere. tap the sheet to start.';
+  hint.textContent = 'a blob flashes, then hides — you redraw its outline (its contour) from memory: any number of strokes, anywhere on the sheet, lifting as often as you like. tap the sheet to start.';
   syncButtons();
   draw();
 })();

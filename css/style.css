@@ -39,7 +39,7 @@
   --hand: 'Caveat', 'Segoe Print', 'Comic Sans MS', cursive;
   --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
 
-  --game-accent: var(--sunny);
+  --game-accent: var(--sunny); /* TODO: pick this game's accent */
 }
 
 :root[data-theme="dark"] {
@@ -383,11 +383,40 @@ a { color: inherit; }
   }
 }
 
+/* The SDK fills this when it knows the input hardware. Scores are eased
+   per device, so the drill says which device it eased for. */
+.hud-input { min-width: 0; border: 0; background: none; padding: 5px 2px; display: flex; align-items: flex-end; }
+.hud-input dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  max-width: 8.5rem;
+  line-height: 1.25;
+}
+
 /* ============================================================
    game-specific styles below this line
    ============================================================ */
 
-/* Contour Memory — the in-stage strip: done ✓ / clear / peek −15.
+/* A long dwell over a canvas is a normal way to start a careful stroke,
+   and on iOS it is also the long-press that raises the copy/share
+   callout right over the drawing. Kill the callout and the text
+   selection; touch-action: none is already set on .game-canvas above. */
+.game-canvas {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* "new round" and "peek" get tapped twice in quick succession; without
+   this that reads as a double-tap zoom and the new scale survives into
+   the next stroke. */
+.btn { touch-action: manipulation; }
+
+/* Contour Memory — the in-stage strip: done ✓ / undo / clear / peek −8.
    Same sticker buttons as the round controls, kept touch-sized. */
 .stage-controls {
   display: flex;
