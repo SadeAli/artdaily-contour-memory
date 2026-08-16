@@ -315,6 +315,60 @@
     return sum / list.length;
   }
 
+  /* A figure that reads well is one of these; a HABIT is three of them.
+     Each figure said its own piece and then the round closed on "press
+     new round" — so a player who shrinks every shape they remember was
+     told "you drew it smaller than it was" three separate times and never
+     once told it was the same mistake three times. One line, naming the
+     pattern across the round, built from the same per-figure numbers the
+     three verdicts were built from so the two can never disagree. */
+  var CLEAN_SHAPE = 88;   /* the same bar placeWords() uses */
+  var SIZE_SMALL = 0.8;   /* …and the same bounds sizeWords() uses */
+  var SIZE_BIG = 1.25;
+
+  function roundCoach(records) {
+    var n = records ? records.length : 0;
+    if (!n) return 'nothing scored this round.';
+    var sides = {}, small = 0, big = 0, clean = 0, i, r, k, topSide = null, topN = 0;
+    for (i = 0; i < n; i++) {
+      r = records[i];
+      if (!r) continue;
+      if (isFinite(r.ratio) && r.ratio > 0) {
+        if (r.ratio < SIZE_SMALL) small += 1;
+        else if (r.ratio > SIZE_BIG) big += 1;
+      }
+      if (isFinite(r.shape) && r.shape >= CLEAN_SHAPE) { clean += 1; continue; }
+      /* own-property tested rather than `sides[name] || 0`: a side name
+         that collides with something on Object.prototype ("constructor")
+         reads back as a function, and `fn + 1` is a string that loses
+         every later comparison — the run would vanish instead of being
+         counted. SIDE_NAMES cannot collide today; a counter must not
+         depend on that staying true. */
+      if (r.side) {
+        sides[r.side] = (Object.prototype.hasOwnProperty.call(sides, r.side) ? sides[r.side] : 0) + 1;
+      }
+    }
+    for (k in sides) {
+      if (Object.prototype.hasOwnProperty.call(sides, k) && sides[k] > topN) { topN = sides[k]; topSide = k; }
+    }
+    if (clean === n) {
+      return 'every outline landed close, and they got trickier as the round went on — that is the whole ramp.';
+    }
+    if (topN >= 2 && topSide) {
+      return 'your memory dropped ' + topSide + ' on ' + topN + ' of the ' + n +
+        ' figures — look there last, so it is the freshest thing you carry.';
+    }
+    if (small * 2 >= n) {
+      return 'you drew them smaller than they were — memory shrinks a shape; take up the room it really had.';
+    }
+    if (big * 2 >= n) {
+      return 'you drew them bigger than they were — the shape is right, the scale is drifting.';
+    }
+    /* FIGURE_SPECS shortens the look AND deepens the shape each figure, so
+       "not the clock" would have been a plain lie about the ramp */
+    return 'no one habit stood out — each figure gets a shorter look than the last, so carry the whole shape, not one edge.';
+  }
+
   /* Closed Catmull-Rom through the control points — pure geometry,
      shared by the renderer and the ground truth. */
   function catmullRomClosed(ctrl, perSeg) {
@@ -412,6 +466,9 @@
 
   /* ---- round state ---- */
   var round = 0, figIdx = 0, figure = null, scores = [], playing = false;
+  /* one {shape, side, ratio} per scored figure — what the round-end
+     coaching is built from (see roundCoach) */
+  var records = [];
   var phase = 'idle'; /* idle | show | draw | reveal | done */
   var strokes = [], curStroke = null, activePointer = null, activeType = '';
   var peekUsed = false, peeking = false, peekTimer = null;
@@ -474,6 +531,7 @@
     round += 1;
     figIdx = 0;
     scores = [];
+    records = [];
     roundResult = null;
     playing = true;
     hudRound.textContent = String(round);
@@ -519,15 +577,18 @@
      shape was actually off — telling someone who scored 96 that their
      left side was marginally the worst is noise, not coaching. */
   function placeWords(res) {
-    if (!res || !res.side || res.shape >= 88) return '';
+    if (!res || !res.side || res.shape >= CLEAN_SHAPE) return '';
     return ' (worst on ' + res.side.side + ')';
   }
 
-  /* "size ratio 0.71x" told a beginner nothing — say it in words. */
+  /* "size ratio 0.71x" told a beginner nothing — say it in words. The
+     bounds are the shared ones roundCoach counts with, so a round that
+     closes on "you drew them smaller" can only follow figures that each
+     said so too. */
   function sizeWords(ratio) {
     if (!isFinite(ratio) || ratio <= 0) return 'size unclear';
-    if (ratio < 0.8) return 'you drew it smaller than it was';
-    if (ratio > 1.25) return 'you drew it bigger than it was';
+    if (ratio < SIZE_SMALL) return 'you drew it smaller than it was';
+    if (ratio > SIZE_BIG) return 'you drew it bigger than it was';
     return 'size about right';
   }
 
@@ -544,6 +605,7 @@
     var pts = flatten(strokes);
     var res = scoreFigure(strokes, figure.pts, peekUsed ? PEEK_COST : 0, floorPx(), slopPx());
     scores.push(res.score);
+    records.push({ shape: res.shape, side: res.side ? res.side.side : null, ratio: res.sizeRatio });
     if (scores.length === FIGURES_PER_ROUND) {
       /* The round is complete NOW — report before the reveal plays out, so
          "new round" (or the embed player closing) during that last 2.6s
@@ -592,7 +654,9 @@
     playing = false;
     phase = 'done'; /* the last reveal stays on the sheet to study */
     var res = roundResult;
-    hint.textContent = 'round done — press "new round" to go again.';
+    /* the round's lesson, not just its exit: three separate verdicts add
+       up to one habit worth naming */
+    hint.textContent = 'round done — ' + roundCoach(records) + ' press "new round" to go again.';
     syncButtons();
     draw();
     if (res) {
