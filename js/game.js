@@ -473,6 +473,9 @@
   var strokes = [], curStroke = null, activePointer = null, activeType = '';
   var peekUsed = false, peeking = false, peekTimer = null;
   var showStart = 0, ringFrac = 1, rafId = 0;
+  /* elapsed exposure banked while the page was hidden, or −1 when not
+     parked — see the visibilitychange handler */
+  var showFrozen = -1;
   var reveal = null, revealTimer = null, revealAt = 0;
   /* the round's reported result, banked the moment the last figure is
      scored — finishRound() is presentation only (see finishFigure) */
@@ -518,9 +521,13 @@
 
   function stopTimers() {
     clearTimeout(revealTimer);
+    revealTimer = null;   /* null means "no beat armed" — the visibility
+                             handler re-arms on exactly that test */
     clearTimeout(peekTimer);
     cancelAnimationFrame(rafId);
+    rafId = 0;
     peeking = false;
+    showFrozen = -1;
   }
 
   function newRound() {
@@ -550,6 +557,7 @@
     figure = makeFigure(figIdx);
     phase = 'show';
     ringFrac = 1;
+    showFrozen = -1;
     showStart = performance.now();
     hint.textContent = figLabel() + ' — memorize it before the ring runs out…';
     syncButtons();
@@ -641,6 +649,7 @@
 
   function nextFigure() {
     clearTimeout(revealTimer);
+    revealTimer = null;
     if (phase !== 'reveal') return;
     figIdx += 1;
     if (figIdx < FIGURES_PER_ROUND) { startFigure(); return; }
@@ -966,6 +975,50 @@
      iPad player picks up the pencil): the SDK repaints its own HUD chip,
      we just re-read the eased tolerance on the next score. */
   ArtDaily.onInput(function () { syncButtons(); draw(); });
+
+  /* A hidden tab is the one place both of this drill's clocks lie, and
+     they lie in opposite directions.
+
+     The EXPOSURE is the whole task. requestAnimationFrame stops while the
+     page is hidden, so a notification, an app switch or a locked phone
+     during the 1.1–2.8s look burned the entire exposure off-screen: the
+     next frame after the return saw elapsed >= exposure and dropped
+     straight into 'draw' for a figure the player never saw. That is a
+     guaranteed near-0 on the figure, it drags the round mean with it, and
+     nothing on the sheet says what happened. Park the clock while hidden
+     and hand the look back in full — nothing can be seen while hidden, so
+     there is no way to farm extra exposure with this.
+
+     setTimeout does the opposite: it keeps firing while hidden, so the
+     reveal beat advanced to the NEXT figure behind the player's back —
+     starting THAT figure's exposure off-screen too, which is how one
+     backgrounded moment used to cost two figures. Park the beat as well.
+     It can never file a round: finishFigure() reports synchronously the
+     instant the third figure is scored, so a beat that never fires costs
+     nothing but the reveal it is holding up. */
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      if (phase === 'show' && showFrozen < 0) {
+        showFrozen = performance.now() - showStart;
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      if (revealTimer !== null) { clearTimeout(revealTimer); revealTimer = null; }
+      return;
+    }
+    if (phase === 'show' && showFrozen >= 0) {
+      showStart = performance.now() - showFrozen;
+      showFrozen = -1;
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(tickShow);
+    }
+    if (playing && phase === 'reveal' && revealTimer === null) {
+      /* the beat starts over, and so does the tap-to-skip guard that
+         stops the returning tap from eating it */
+      revealAt = performance.now();
+      revealTimer = setTimeout(nextFigure, REVEAL_MS);
+    }
+  });
 
   /* On resize everything scales uniformly (height tracks width), so
      the memorized figure and the ink stay fair — never regenerated. */
